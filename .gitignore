@@ -1,2 +1,4 @@
 venv
 __pycache__
+datos.json
+ejemplos_extra.json

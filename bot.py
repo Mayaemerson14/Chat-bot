@@ -1,237 +1,321 @@
+import csv
+import html
+import io
 import os
-import random
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from datetime import datetime
 
-from predict import analizar_texto
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandler,
+                          ContextTypes, MessageHandler, filters)
+
+import datos
+from predict import aprender, predecir_categoria
 
 # ─── Configuración ──────────────────────────────────────
-
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-
 if not TOKEN:
-    print("❌ ERROR: Variable TELEGRAM_TOKEN no configurada")
-    print("📌 Configuración:")
+    print("❌ Falta la variable TELEGRAM_TOKEN")
     print("   En PowerShell: $env:TELEGRAM_TOKEN='tu_token_aqui'")
     exit(1)
 
-# ─── Datos ──────────────────────────────────────────────
+UMBRAL = 0.25  # por debajo de esta confianza el bot avisa que no está seguro
+HTML = ParseMode.HTML
 
-# INTERPRETACIONES: Qué significa el mensaje que te enviaron
-INTERPRETACIONES = {
-    "reclamo": [
-        "📢 La persona se siente ignorada y reclama tu atención.",
-        "😤 Hay frustración porque esperaba una respuesta y no llegó.",
-        "💢 Percibe que la estás descuidando o ignorando.",
-    ],
-    "celos": [
-        "😒 Siente inseguridad y teme que haya un tercero.",
-        "🔍 Necesita confirmar que sigue siendo importante para ti.",
-        "🤨 Desconfía de tus acciones o amistades.",
-    ],
-    "agresion": [
-        "⚠️ Está muy enojado y busca herir o provocar.",
-        "🔥 El conflicto puede escalar si respondes de forma similar.",
-        "💥 Hay agresividad que debes manejar con cuidado.",
-    ],
-    "tristeza": [
-        "😢 Está pasando por un momento difícil o de dolor.",
-        "🫂 Necesita apoyo emocional y contención.",
-        "💔 Hay vulnerabilidad, no lo ignores.",
-    ],
-    "manipulacion": [
-        "🎭 Está usando culpa o condiciones para obtener lo que quiere.",
-        "⛓️ Quiere presionarte emocionalmente para que actúes.",
-        "⚠️ Ten cuidado con responder desde la culpa.",
-    ],
-    "control": [
-        "🔒 Quiere saber todo lo que haces y con quién.",
-        "👁️ Hay una necesidad excesiva de controlarte.",
-        "📱 No confía plenamente en ti.",
-    ],
-    "ruptura": [
-        "💔 Está considerando seriamente terminar la relación.",
-        "😩 Hay agotamiento emocional acumulado.",
-        "🚪 Quiere distancia o poner un punto final.",
-    ],
-    "desinteres": [
-        "😐 No muestra interés en seguir la conversación.",
-        "❄️ Hay distancia emocional o está ocupado.",
-        "📉 Probablemente no quiere profundizar.",
-    ],
-    "inseguridad": [
-        "😟 Tiene dudas sobre la relación o sobre sí mismo.",
-        "🤔 Necesita reafirmación y seguridad.",
-        "🌀 Busca calmar su ansiedad con respuestas claras.",
-    ],
-    "afecto": [
-        "💕 Está expresando cariño y buenos sentimientos.",
-        "🤗 Quiere acercarse y fortalecer el vínculo.",
-        "🌸 Hay conexión emocional positiva.",
-    ],
-    "curiosidad": [
-        "🤔 Tiene interés genuino en ti y tu vida.",
-        "💬 Quiere iniciar o mantener una conversación.",
-        "🔍 Busca conocer más sobre ti.",
-    ],
-    "normal": [
-        "💬 Es una conversación cotidiana sin carga emocional.",
-        "✅ No hay señales de conflicto ni urgencia.",
-        "📝 Todo fluye con normalidad.",
-    ],
-}
+AYUDA = (
+    "💰 <b>Bot de finanzas personales</b>\n\n"
+    "<b>Registrar un movimiento</b>, escríbelo con su valor:\n"
+    "• <code>pizza 25000</code>\n"
+    "• <code>uber 12k</code>\n"
+    "• <code>cuota de la moto 350.000</code>\n"
+    "• <code>compré bitcoin 200000</code>\n"
+    "• <code>sueldo 2 millones</code>\n"
+    "Yo detecto la categoría con machine learning 🤖 y si me equivoco la corriges con un botón.\n\n"
+    "<b>Comandos</b>\n"
+    "/saldo — ver tu saldo\n"
+    "/saldo 500000 — decirme cuánto dinero tienes ahora\n"
+    "/resumen — resumen del mes por categoría\n"
+    "/grafica — gráfica de tus gastos del mes\n"
+    "/ultimos — tus últimos movimientos\n"
+    "/presupuesto 800000 — límite de gastos mensual (te aviso al 80%)\n"
+    "/borrar — elimina el último movimiento\n"
+    "/exportar — descarga tus movimientos en CSV\n"
+    "/ayuda — ver este mensaje"
+)
 
-# SUGERENCIAS: Cómo responder al mensaje (para TI)
-SUGERENCIAS = {
-    "reclamo": [
-        "🗣️ Responde: 'Entiendo que te sientes ignorado, no fue mi intención. Hablemos.'",
-        "⏸️ Reconoce su molestia antes de dar explicaciones: 'Tienes razón, no respondí rápido.'",
-        "🤝 Pregunta: '¿Qué puedo hacer para que no te sientas así?'",
-    ],
-    "celos": [
-        "🧠 Responde con calma: 'No hay nadie más, pero entiendo tu inseguridad.'",
-        "💬 Valida su emoción: 'Veo que esto te preocupa, hablemos sin pelear.'",
-        "🔐 Reafirma: 'Eres importante para mí. ¿Podemos hablar de esto tranquilos?'",
-    ],
-    "agresion": [
-        "🌬️ No respondas con agresión. Di: 'Esto se está poniendo feo, hablemos más tarde.'",
-        "🚫 Establece límite: 'No voy a responder si me hablas así.'",
-        "⏰ Tómate un tiempo: 'Mejor hablamos cuando estemos más calmados.'",
-    ],
-    "tristeza": [
-        "👥 Responde: 'Estoy aquí para ti. ¿Quieres hablar de lo que pasa?'",
-        "💬 Muestra apoyo: 'Lamento que te sientas así, cuentas conmigo.'",
-        "🤗 Ofrece compañía: '¿Necesitas desahogarte o prefieres distraerte?'",
-    ],
-    "manipulacion": [
-        "🚩 No cedas por culpa. Di: 'No me gusta que me condiciones así.'",
-        "🗣️ Marca límite: 'Si me quieres pedir algo, hazlo sin chantajes.'",
-        "⚖️ Responde neutro: 'Te escucho, pero no voy a reaccionar desde la culpa.'",
-    ],
-    "control": [
-        "🤝 Responde: 'Confío en ti y espero que tú confíes en mí.'",
-        "📱 Marca espacio: 'Está bien que quieras saber, pero también necesito mi espacio.'",
-        "🧘 Tranquiliza: 'No pasa nada, pero no puedo responder todo el tiempo.'",
-    ],
-    "ruptura": [
-        "💬 Responde: 'Hablemos esto en persona, es importante.'",
-        "🤔 Pide tiempo: 'No tomemos decisiones en caliente. Hablemos mañana.'",
-        "🕊️ Si es firme: 'Lo respeto si es tu decisión, pero me duele.'",
-    ],
-    "desinteres": [
-        "🧐 Pregunta: '¿Estás bien? Parece que no tienes ganas de hablar.'",
-        "💬 Dale espacio: 'Cuando quieras hablar, aquí estoy.'",
-        "⏸️ No insistas: 'Ok, hablamos cuando tengas tiempo.'",
-    ],
-    "inseguridad": [
-        "🔍 Responde: 'Estoy contigo, no tienes nada que temer.'",
-        "💬 Tranquiliza: 'Si algo te preocupa, pregúntame sin miedo.'",
-        "📖 Reafirma: 'Me importas y no tengo nada que ocultar.'",
-    ],
-    "afecto": [
-        "🌸 Corresponde: 'Yo también te quiero mucho ❤️'",
-        "💌 Agradece: 'Qué bonito mensaje, gracias por tus palabras.'",
-        "🎁 Sorprende: 'Me hiciste el día, te quiero igual.'",
-    ],
-    "curiosidad": [
-        "🔍 Responde con entusiasmo: 'Todo bien, ¿y tú? Cuéntame.'",
-        "💬 Aprovecha: 'Justo pensaba en ti. ¿Qué has hecho?'",
-        "🌟 Sigue la conversación: 'Me alegra que preguntes, te cuento...'",
-    ],
-    "normal": [
-        "👍 Responde con naturalidad: 'Todo bien, ¿y tú?'",
-        "💬 Sigue la conversación: 'Qué bueno, seguimos hablando.'",
-        "🌟 Mantén el tono: 'Genial, cualquier cosa me dices.'",
-    ],
-}
-
-EMOJIS = {
-    "reclamo": "😔",
-    "celos": "😒",
-    "agresion": "⚠️",
-    "tristeza": "😢",
-    "manipulacion": "🚩",
-    "control": "🔒",
-    "ruptura": "💔",
-    "desinteres": "😶",
-    "inseguridad": "😟",
-    "afecto": "💕",
-    "curiosidad": "🤔",
-    "normal": "💬",
-}
-
-EMOJIS_EMOCION = {
-    "positivo": "😊",
-    "tristeza": "😢",
-    "enojo": "😠",
-    "sorpresa": "😲",
-    "disgusto": "😖",
-    "miedo": "😨",
-    "neutral": "😐",
-}
 
 # ─── Funciones auxiliares ───────────────────────────────
+def pesos(n) -> str:
+    return ("-" if n < 0 else "") + "$" + f"{abs(int(round(n))):,}".replace(",", ".")
 
-def construir_barra(valor: int) -> str:
-    bloques = valor // 10
-    return "█" * bloques + "░" * (10 - bloques)
 
-def obtener_texto(diccionario, clave, default="normal"):
-    return random.choice(diccionario.get(clave, diccionario[default]))
+def mes_actual() -> str:
+    return datetime.now().strftime("%Y-%m")
 
-def formatear_respuesta(datos: dict) -> str:
-    return (
-        f"{datos['emoji_principal']} *Análisis del mensaje que te enviaron*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{datos['emoji_emocion']} *Emoción detectada:* {datos['emocion']}\n"
-        f"🚩 *Toxicidad:* {datos['toxicidad']}\n"
-        f"🧠 *Intención:* {datos['intencion']}\n"
-        f"💔 *Ghosting:* {datos['ghosting_bar']} {datos['ghosting']}%\n"
-        f"🔥 *Riesgo:* {datos['riesgo']}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Qué significa:*\n{datos['interpretacion']}\n\n"
-        f"💬 *Cómo responder:*\n{datos['sugerencia']}"
-    )
 
-# ─── Handler principal ──────────────────────────────────
+def nombre_mes(mes: str) -> str:
+    anio, num = mes.split("-")
+    return f"{datos.MESES[int(num) - 1]} {anio}"
 
-async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        texto = update.message.text
-        
-        emocion, toxicidad, ghosting, riesgo, intencion, confianza = analizar_texto(texto)
-        
-        datos = {
-            "emoji_principal": EMOJIS.get(intencion, "💬"),
-            "emoji_emocion": EMOJIS_EMOCION.get(emocion, "😐"),
-            "emocion": emocion.capitalize(),
-            "toxicidad": "🔴 Alta" if toxicidad == "si" else "🟢 Baja",
-            "intencion": intencion.capitalize(),
-            "ghosting": ghosting,
-            "ghosting_bar": construir_barra(ghosting),
-            "riesgo": riesgo,
-            "interpretacion": obtener_texto(INTERPRETACIONES, intencion),
-            "sugerencia": obtener_texto(SUGERENCIAS, intencion),
-        }
-        
-        respuesta = formatear_respuesta(datos)
-        await update.message.reply_text(respuesta, parse_mode="Markdown")
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        await update.message.reply_text("⚠️ Ocurrió un error al procesar el mensaje.")
+
+def barra(valor: float, total: float, largo: int = 10) -> str:
+    bloques = round(valor / total * largo) if total else 0
+    return "█" * bloques + "░" * (largo - bloques)
+
+
+def formato_movimiento(uid, mov: dict, nota: str = "") -> str:
+    cat = mov["categoria"]
+    titulo = "💰 Ingreso registrado" if cat == "ingreso" else "✅ Movimiento registrado"
+    lineas = [f"<b>{titulo}</b>",
+              f"{datos.EMOJIS[cat]} {datos.NOMBRES[cat]} — <b>{pesos(mov['monto'])}</b>"]
+    if mov["descripcion"]:
+        lineas.append(f"📝 {html.escape(mov['descripcion'])}")
+    lineas.append(f"💵 Saldo: <b>{pesos(datos.saldo_actual(datos.usuario(uid)))}</b>")
+    if nota:
+        lineas.append(f"\n{nota}")
+    return "\n".join(lineas)
+
+
+def botones_movimiento(mov_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 Cambiar categoría", callback_data=f"cambiar:{mov_id}"),
+        InlineKeyboardButton("🗑️ Deshacer", callback_data=f"borrar:{mov_id}"),
+    ]])
+
+
+def botones_categorias(mov_id: int) -> InlineKeyboardMarkup:
+    claves = list(datos.NOMBRES)
+    botones = [InlineKeyboardButton(f"{datos.EMOJIS[c]} {datos.NOMBRES[c]}",
+                                    callback_data=f"cat:{mov_id}:{c}") for c in claves]
+    filas = [botones[i:i + 3] for i in range(0, len(botones), 3)]
+    return InlineKeyboardMarkup(filas)
+
+
+def alerta_presupuesto(u: dict) -> str:
+    limite = u["presupuesto"]
+    if not limite:
+        return ""
+    gastos = datos.totales_mes(u, mes_actual())["gastos"]
+    if gastos >= limite:
+        return f"🚨 ¡Superaste tu presupuesto! Llevas {pesos(gastos)} de {pesos(limite)}."
+    if gastos >= limite * 0.8:
+        return f"⚠️ Ojo: ya gastaste el {gastos / limite:.0%} de tu presupuesto ({pesos(gastos)} de {pesos(limite)})."
+    return ""
+
+
+# ─── Registro de movimientos (mensajes normales) ────────
+async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    resultado = datos.extraer_monto(update.message.text)
+    if not resultado:
+        await update.message.reply_text(
+            "No encontré un monto 🤔\nEscríbelo así: <code>pizza 25000</code> (usa /ayuda para ver más).",
+            parse_mode=HTML)
+        return
+
+    monto, descripcion = resultado
+    if descripcion:
+        categoria, confianza = predecir_categoria(descripcion)
+    else:
+        categoria, confianza = "otros", 0.0
+
+    nota = f"🤖 Confianza del modelo: {confianza:.0%}"
+    if confianza < UMBRAL:
+        categoria = "otros"
+        nota = "🤔 No estoy seguro de la categoría. Toca «Cambiar categoría» y aprenderé de tu respuesta."
+
+    mov = datos.agregar_movimiento(uid, monto, categoria, descripcion)
+    aviso = alerta_presupuesto(datos.usuario(uid)) if categoria in datos.GASTOS else ""
+    if aviso:
+        nota += "\n\n" + aviso
+    await update.message.reply_text(formato_movimiento(uid, mov, nota), parse_mode=HTML,
+                                    reply_markup=botones_movimiento(mov["id"]))
+
+
+# ─── Botones (cambiar categoría / deshacer) ─────────────
+async def botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    await query.answer()
+    partes = query.data.split(":")
+    accion, mov_id = partes[0], int(partes[1])
+    mov = datos.buscar_movimiento(uid, mov_id)
+
+    if not mov:
+        await query.edit_message_text("Ese movimiento ya no existe.")
+        return
+
+    if accion == "cambiar":
+        await query.edit_message_reply_markup(botones_categorias(mov_id))
+
+    elif accion == "cat":
+        nueva = partes[2]
+        datos.cambiar_categoria(uid, mov_id, nueva)
+        if mov["descripcion"]:
+            aprender(mov["descripcion"], nueva)  # el modelo aprende de la corrección
+        await query.edit_message_text(
+            formato_movimiento(uid, mov, "🧠 Anotado, aprendí de tu corrección."),
+            parse_mode=HTML, reply_markup=botones_movimiento(mov_id))
+
+    elif accion == "borrar":
+        datos.borrar_movimiento(uid, mov_id)
+        await query.edit_message_text("🗑️ Movimiento eliminado.")
+
+
+# ─── Comandos ───────────────────────────────────────────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 ¡Hola! Soy tu asistente de finanzas.\n"
+        "Para empezar dime cuánto dinero tienes con /saldo (por ejemplo <code>/saldo 500000</code>), "
+        "y luego anota cada gasto escribiéndolo, como <code>almuerzo 15000</code>.\n\n"
+        "Usa /ayuda para ver todo lo que puedo hacer.", parse_mode=HTML)
+
+
+async def ayuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(AYUDA, parse_mode=HTML)
+
+
+async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = datos.usuario(update.effective_user.id)
+    if context.args:
+        resultado = datos.extraer_monto(" ".join(context.args))
+        if not resultado:
+            await update.message.reply_text("Escribe un valor válido, por ejemplo: /saldo 500000")
+            return
+        datos.ajustar_saldo(u, resultado[0])
+        await update.message.reply_text(f"✅ Listo, tu saldo ahora es <b>{pesos(resultado[0])}</b>.", parse_mode=HTML)
+    else:
+        await update.message.reply_text(f"💵 Tu saldo actual es <b>{pesos(datos.saldo_actual(u))}</b>.", parse_mode=HTML)
+
+
+async def cmd_resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = datos.usuario(update.effective_user.id)
+    mes = mes_actual()
+    t = datos.totales_mes(u, mes)
+    if not t["por_categoria"]:
+        await update.message.reply_text("Aún no tienes movimientos este mes. Escribe, por ejemplo: pizza 25000")
+        return
+
+    lineas = [f"📊 <b>Resumen de {nombre_mes(mes)}</b>", "",
+              f"💰 Ingresos: <b>{pesos(t['ingresos'])}</b>",
+              f"💸 Gastos: <b>{pesos(t['gastos'])}</b>",
+              f"📈 Ahorro e inversión: <b>{pesos(t['apartado'])}</b>",
+              f"💵 Saldo actual: <b>{pesos(datos.saldo_actual(u))}</b>", "", "<b>Por categoría</b>"]
+
+    egresos = {c: v for c, v in t["por_categoria"].items() if c != "ingreso"}
+    total_egresos = sum(egresos.values())
+    for cat, valor in sorted(egresos.items(), key=lambda x: x[1], reverse=True):
+        lineas.append(f"{datos.EMOJIS[cat]} {datos.NOMBRES[cat]}: {pesos(valor)}\n   {barra(valor, total_egresos)} {valor / total_egresos:.0%}")
+
+    if u["presupuesto"]:
+        pct = t["gastos"] / u["presupuesto"]
+        lineas += ["", f"🎯 Presupuesto: {pesos(t['gastos'])} de {pesos(u['presupuesto'])} ({pct:.0%})"]
+    await update.message.reply_text("\n".join(lineas), parse_mode=HTML)
+
+
+async def cmd_ultimos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = datos.usuario(update.effective_user.id)
+    if not u["movimientos"]:
+        await update.message.reply_text("Aún no tienes movimientos.")
+        return
+    lineas = ["🧾 <b>Últimos movimientos</b>", ""]
+    for m in reversed(u["movimientos"][-10:]):
+        fecha = datetime.fromisoformat(m["fecha"]).strftime("%d/%m")
+        signo = "+" if m["categoria"] == "ingreso" else "-"
+        desc = html.escape(m["descripcion"]) or "(sin descripción)"
+        lineas.append(f"{fecha} {datos.EMOJIS[m['categoria']]} {desc}: {signo}{pesos(m['monto'])}")
+    await update.message.reply_text("\n".join(lineas), parse_mode=HTML)
+
+
+async def cmd_presupuesto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = datos.usuario(update.effective_user.id)
+    if context.args:
+        resultado = datos.extraer_monto(" ".join(context.args))
+        if not resultado:
+            await update.message.reply_text("Escribe un valor válido, por ejemplo: /presupuesto 800000")
+            return
+        u["presupuesto"] = resultado[0]
+        datos.guardar()
+        await update.message.reply_text(f"🎯 Presupuesto mensual fijado en <b>{pesos(resultado[0])}</b>.", parse_mode=HTML)
+    elif u["presupuesto"]:
+        gastos = datos.totales_mes(u, mes_actual())["gastos"]
+        await update.message.reply_text(
+            f"🎯 Presupuesto: {pesos(u['presupuesto'])}\nGastado este mes: {pesos(gastos)} ({gastos / u['presupuesto']:.0%})")
+    else:
+        await update.message.reply_text("No tienes presupuesto. Fíjalo así: /presupuesto 800000")
+
+
+async def cmd_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    u = datos.usuario(uid)
+    if not u["movimientos"]:
+        await update.message.reply_text("No hay nada para borrar.")
+        return
+    ultimo = u["movimientos"][-1]
+    datos.borrar_movimiento(uid, ultimo["id"])
+    await update.message.reply_text(f"🗑️ Eliminé: {html.escape(ultimo['descripcion']) or 'movimiento'} ({pesos(ultimo['monto'])})",
+                                    parse_mode=HTML)
+
+
+async def cmd_grafica(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    u = datos.usuario(update.effective_user.id)
+    mes = mes_actual()
+    por_cat = datos.totales_mes(u, mes)["por_categoria"]
+    gastos = {c: v for c, v in por_cat.items() if c in datos.GASTOS}
+    if not gastos:
+        await update.message.reply_text("Aún no hay gastos este mes para graficar.")
+        return
+
+    etiquetas = [f"{datos.NOMBRES[c]}" for c in gastos]
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.pie(list(gastos.values()), labels=etiquetas, autopct="%1.0f%%", startangle=90)
+    ax.set_title(f"Gastos de {nombre_mes(mes)}\nTotal: {pesos(sum(gastos.values()))}")
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", bbox_inches="tight")
+    plt.close(fig)
+    buffer.seek(0)
+    await update.message.reply_photo(buffer)
+
+
+async def cmd_exportar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = datos.usuario(update.effective_user.id)
+    if not u["movimientos"]:
+        await update.message.reply_text("Aún no tienes movimientos para exportar.")
+        return
+    texto = io.StringIO()
+    escritor = csv.writer(texto)
+    escritor.writerow(["fecha", "categoria", "descripcion", "monto"])
+    for m in u["movimientos"]:
+        escritor.writerow([m["fecha"], datos.NOMBRES[m["categoria"]], m["descripcion"], m["monto"]])
+    archivo = io.BytesIO(texto.getvalue().encode("utf-8-sig"))  # utf-8-sig para que Excel lea las tildes
+    archivo.name = "movimientos.csv"
+    await update.message.reply_document(archivo)
+
 
 # ─── Inicialización ─────────────────────────────────────
+async def error_general(update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"❌ Error: {context.error}")
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text("⚠️ Ocurrió un error, intenta de nuevo.")
+
 
 def main():
-    print("🤖 Bot de análisis de mensajes activo...")
-    print("📌 Analizo los mensajes que TE ENVÍAN y te digo cómo responder")
-    
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
-    
-    print("🟢 Bot corriendo... Esperando mensajes")
+    for nombre, funcion in [("start", start), ("ayuda", ayuda), ("saldo", cmd_saldo),
+                            ("resumen", cmd_resumen), ("ultimos", cmd_ultimos),
+                            ("presupuesto", cmd_presupuesto), ("borrar", cmd_borrar),
+                            ("grafica", cmd_grafica), ("exportar", cmd_exportar)]:
+        app.add_handler(CommandHandler(nombre, funcion))
+    app.add_handler(CallbackQueryHandler(botones))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, registrar))
+    app.add_error_handler(error_general)
+    print("🟢 Bot de finanzas corriendo... (Ctrl+C para detener)")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()

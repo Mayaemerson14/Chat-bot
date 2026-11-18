@@ -1,151 +1,146 @@
-# predict.py - Versión para pysentimiento 0.7.3
-from pysentimiento import create_analyzer
+"""
+Modelo de machine learning: clasifica la CATEGORÍA de un gasto a partir de su descripción.
+TF-IDF (texto -> números) + Regresión Logística (clasificador).
 
-# ─── Modelos preentrenados ─────────────────────────
+El modelo se entrena con EJEMPLOS y, además, con las correcciones que hacen los usuarios
+(se guardan en ejemplos_extra.json), así que mejora mientras se usa.
+"""
+import json
+import os
+import re
+import unicodedata
 
-print("🔄 Cargando modelos de pysentimiento...")
-emotion_analyzer = create_analyzer(task="emotion", lang="es")
-hate_analyzer = create_analyzer(task="hate_speech", lang="es")
-print("✅ Modelos cargados correctamente")
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
 
-# ─── Intención (reglas mejoradas) ─────────────────────
+ARCHIVO_EXTRA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ejemplos_extra.json")
 
-def detectar_intencion(texto):
-    texto = texto.lower()
-    
-    # Afecto positivo
-    if any(palabra in texto for palabra in ["te quiero", "te amo", "me gustas", "te extraño", "te necesito", "te adoro", "te quiero mucho"]):
-        return "afecto"
-    
-    # Reclamos
-    elif any(palabra in texto for palabra in ["por qué no respondes", "me ignoras", "no contestas", "por qué tardas", "por qué demoras", "no me escribes"]):
-        return "reclamo"
-    
-    # Celos
-    elif any(palabra in texto for palabra in ["con quién", "quién es", "te veo con", "andabas con", "quién te escribió", "quién te habla"]):
-        return "celos"
-    
-    # Agresión
-    elif any(palabra in texto for palabra in ["odio", "mal", "estúpido", "idiota", "imbécil", "estúpida", "mierda", "qué asco"]):
-        return "agresion"
-    
-    # Ruptura
-    elif any(palabra in texto for palabra in ["terminar", "dejar", "no quiero seguir", "acabó", "se acabó", "hasta aquí", "se terminó"]):
-        return "ruptura"
-    
-    # Manipulación
-    elif any(palabra in texto for palabra in ["si me quisieras", "deberías", "nunca haces", "siempre igual", "como siempre", "si realmente me quisieras"]):
-        return "manipulacion"
-    
-    # Control
-    elif any(palabra in texto for palabra in ["dónde estás", "qué haces", "con quién hablas", "dime la verdad", "ubicación", "envía ubicación"]):
-        return "control"
-    
-    # Desinterés
-    elif any(palabra in texto for palabra in ["ok", "vale", "ah", "ya", "como digas", "da igual", "me da igual", "jaja", "jeje", "ok ok"]):
-        return "desinteres"
-    
-    # Curiosidad
-    elif any(palabra in texto for palabra in ["qué tal", "cómo estás", "qué haces", "cómo te va", "en qué andas", "qué cuentas"]):
-        return "curiosidad"
-    
-    # Tristeza
-    elif any(palabra in texto for palabra in ["triste", "deprimido", "mal", "solo", "soledad", "llorar", "me siento mal"]):
-        return "tristeza"
-    
-    else:
-        return "normal"
+EJEMPLOS = {
+    "comida": [
+        "pizza", "almuerzo", "hamburguesa", "mercado", "supermercado", "cafe", "domicilio de comida",
+        "empanadas", "desayuno", "cena en restaurante", "helado", "gaseosa", "pan", "frutas",
+        "comida rapida", "jugo", "snacks", "pollo asado", "papitas", "restaurante", "carne", "arepas",
+    ],
+    "transporte": [
+        "bus", "taxi", "uber", "gasolina", "metro", "pasaje", "parqueadero", "peaje", "tiquete de bus",
+        "didi", "mantenimiento del carro", "tanquear la moto", "cabify", "indriver", "recarga cuenta del metro",
+        "viaje en taxi", "cicla", "buseta",
+    ],
+    "ocio": [
+        "cine", "salida con amigos", "fiesta", "discoteca", "videojuego", "concierto", "cerveza",
+        "partido de futbol", "paseo", "bar", "karaoke", "boletas", "entrada al parque", "licor",
+        "juego de ps5", "steam", "viaje de vacaciones", "trago", "billar", "boleta del estadio",
+    ],
+    "servicios": [
+        "recibo de la luz", "agua", "internet", "plan de celular", "gas", "netflix", "spotify",
+        "factura de energia", "telefono", "suscripcion", "recarga de celular", "tv cable",
+        "recibo del agua", "youtube premium", "wifi", "energia", "disney plus",
+    ],
+    "salud": [
+        "medicamentos", "cita medica", "drogueria", "dentista", "pastillas", "examenes de laboratorio",
+        "gafas", "eps", "consulta medica", "vitaminas", "psicologo", "gimnasio", "acetaminofen",
+        "odontologo", "tratamiento", "farmacia",
+    ],
+    "educacion": [
+        "matricula", "libros", "curso online", "pension del colegio", "cuaderno", "fotocopias",
+        "utiles escolares", "universidad", "papeleria", "clases de ingles", "semestre", "udemy",
+        "impresiones", "taller", "colegio", "diplomado",
+    ],
+    "ropa": [
+        "camisa", "zapatos", "jeans", "ropa", "tenis", "chaqueta", "vestido", "gorra", "medias",
+        "accesorios", "bolso", "perfume", "buso", "pantalon", "sudadera", "camiseta",
+    ],
+    "hogar": [
+        "arriendo", "administracion", "muebles", "reparacion de la casa", "productos de aseo",
+        "plomero", "electrodomestico", "decoracion", "lavadora", "detergente", "pintura de la casa",
+        "cama nueva", "nevera", "utensilios de cocina", "aseo", "cortinas",
+    ],
+    "deudas": [
+        "pago deuda", "cuota del prestamo", "abono a la tarjeta de credito", "le pague a mi amigo lo que debia",
+        "cuota de la moto", "pago credito", "deuda del banco", "cuota del celular", "prestamo",
+        "pague la tarjeta", "intereses", "le debia a mi mama", "cuota del carro", "credito", "abono deuda",
+        "pago de la tarjeta",
+    ],
+    "inversiones": [
+        "compre acciones", "inversion en bitcoin", "cdt", "fondo de inversion", "criptomonedas",
+        "invertir en etf", "dolares para invertir", "acciones de ecopetrol", "inversion en un negocio",
+        "fiducia", "bitcoin", "etf", "invertir", "acciones", "ethereum", "inversion",
+    ],
+    "ahorro": [
+        "ahorro", "guarde en la alcancia", "ahorros del mes", "meta de ahorro", "fondo de emergencia",
+        "alcancia", "consigne a ahorros", "ahorro para el viaje", "separe plata para ahorrar",
+        "cuenta de ahorros", "ahorrar", "ahorro del mes", "guardado",
+    ],
+    "ingreso": [
+        "sueldo", "me pagaron", "salario", "me llego plata", "venta", "cobre", "me consignaron",
+        "pago del trabajo", "quincena", "me regalaron plata", "recibi", "mesada", "freelance",
+        "gane", "ingreso", "me pagaron el trabajo", "pago de un cliente", "deposito", "nomina",
+    ],
+    "otros": [
+        "regalo", "varios", "cosas", "donacion", "propina", "multa", "otro gasto", "imprevisto",
+        "veterinario", "gasto raro", "cosas varias", "no se que fue",
+    ],
+}
 
-# ─── Ghosting ─────────────────────────────────────────
 
-def calcular_ghosting(texto, intencion, emocion):
-    score = 0
-    texto = texto.lower()
-    
-    # Mensajes muy cortos
-    if len(texto) <= 5:
-        score += 35
-    
-    # Respuesta de una palabra
-    if len(texto.split()) == 1:
-        score += 25
-    
-    # Palabras que indican desinterés
-    if any(palabra in texto for palabra in ["ok", "vale", "ah", "ya", "luego", "ocupado", "ahora no", "después", "mañana", "ahora no puedo"]):
-        score += 30
-    
-    # Intención relacionada
-    if intencion == "desinteres":
-        score += 35
-    elif intencion == "reclamo":
-        score += 15
-    elif intencion == "afecto":
-        score -= 25
-    
-    # Emoción negativa
-    if emocion in ["sadness", "anger", "fear", "disgust"]:
-        score += 10
-    elif emocion in ["joy", "surprise"]:
-        score -= 15
-    
-    return max(0, min(score, 95))
+def normalizar(texto: str) -> str:
+    texto = texto.lower().strip()
+    texto = unicodedata.normalize("NFD", texto)
+    texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+    texto = re.sub(r"[^a-z0-9 ]", " ", texto)
+    return re.sub(r"\s+", " ", texto).strip()
 
-# ─── Calcular riesgo ───────────────────────────────────
 
-def calcular_riesgo(hate_result, intencion, emocion):
-    # Verificar si hay hate_speech
-    if hate_result.output == "hateful" or hate_result.output == "targeted":
-        return "🔴 Alto"
-    elif intencion in ["celos", "reclamo", "ruptura", "manipulacion", "agresion"]:
-        return "🟡 Medio"
-    elif emocion in ["anger", "disgust"]:
-        return "🟡 Medio"
-    else:
-        return "🟢 Bajo"
+def _cargar_extra() -> list:
+    if os.path.exists(ARCHIVO_EXTRA):
+        try:
+            with open(ARCHIVO_EXTRA, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return []
 
-# ─── Mapear emociones ───────────────────────────────────
 
-def mapear_emocion(emocion_raw):
-    emocion_map = {
-        'joy': 'positivo',
-        'sadness': 'tristeza',
-        'anger': 'enojo',
-        'surprise': 'sorpresa',
-        'disgust': 'disgusto',
-        'fear': 'miedo',
-        'neutral': 'neutral'
-    }
-    return emocion_map.get(emocion_raw, 'neutral')
+def _entrenar():
+    frases, etiquetas = [], []
+    for categoria, lista in EJEMPLOS.items():
+        for frase in lista:
+            frases.append(normalizar(frase))
+            etiquetas.append(categoria)
+    for frase, categoria in _cargar_extra():
+        frases.append(normalizar(frase))
+        etiquetas.append(categoria)
+    modelo = make_pipeline(
+        TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4)),
+        LogisticRegression(C=20, max_iter=2000),
+    )
+    modelo.fit(frases, etiquetas)
+    return modelo
 
-# ─── Función principal ─────────────────────────────────
 
-def analizar_texto(texto):
-    try:
-        # 🔥 MODELOS IA con pysentimiento
-        emocion_pred = emotion_analyzer.predict(texto)
-        hate_pred = hate_analyzer.predict(texto)
-        
-        # Obtener emoción principal
-        emocion_raw = emocion_pred.output
-        emocion = mapear_emocion(emocion_raw)
-        
-        # Toxicidad (basada en hate_speech)
-        toxicidad = "si" if hate_pred.output in ["hateful", "targeted"] else "no"
-        
-        # Intención (reglas)
-        intencion = detectar_intencion(texto)
-        
-        # Ghosting
-        ghosting = calcular_ghosting(texto, intencion, emocion_raw)
-        
-        # Riesgo
-        riesgo = calcular_riesgo(hate_pred, intencion, emocion_raw)
-        
-        # Confianza
-        confianza = max(emocion_pred.probas.values())
-        
-        return emocion, toxicidad, ghosting, riesgo, intencion, int(confianza * 100)
-    
-    except Exception as e:
-        print(f"Error en analizar_texto: {e}")
-        return "neutral", "no", 0, "🟢 Bajo", "normal", 50
+_MODELO = _entrenar()
+
+
+def predecir_categoria(texto: str):
+    """Devuelve (categoria, confianza entre 0 y 1)."""
+    probas = _MODELO.predict_proba([normalizar(texto)])[0]
+    i = probas.argmax()
+    return str(_MODELO.classes_[i]), float(probas[i])
+
+
+def aprender(texto: str, categoria: str):
+    """Guarda una corrección del usuario y reentrena el modelo."""
+    global _MODELO
+    extra = _cargar_extra()
+    extra.append([texto, categoria])
+    with open(ARCHIVO_EXTRA, "w", encoding="utf-8") as f:
+        json.dump(extra, f, ensure_ascii=False, indent=2)
+    _MODELO = _entrenar()
+
+
+if __name__ == "__main__":
+    for prueba in ["pizza con amigos", "uber al trabajo", "cuota del banco", "compre bitcoin",
+                   "me pagaron el mes", "recibo de la luz", "zapatos nuevos", "asdfgh"]:
+        cat, conf = predecir_categoria(prueba)
+        print(f"{prueba:25} -> {cat:12} {conf:.0%}")
