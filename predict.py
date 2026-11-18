@@ -2,8 +2,9 @@
 Modelo de machine learning: clasifica la CATEGORÍA de un gasto a partir de su descripción.
 TF-IDF (texto -> números) + Regresión Logística (clasificador).
 
-El modelo se entrena con EJEMPLOS y, además, con las correcciones que hacen los usuarios
-(se guardan en ejemplos_extra.json), así que mejora mientras se usa.
+Cada usuario tiene SU PROPIO modelo: se entrena con los ejemplos base, con el nombre de sus
+categorías personalizadas y con las correcciones que él mismo ha hecho (ejemplos_extra.json).
+Así, si creas la categoría "Regalo hijo", el modelo aprende qué gastos van ahí.
 """
 import json
 import os
@@ -92,25 +93,36 @@ def normalizar(texto: str) -> str:
     return re.sub(r"\s+", " ", texto).strip()
 
 
-def _cargar_extra() -> list:
+def _cargar_extra() -> dict:
+    """Correcciones de los usuarios: {id_usuario: [[texto, categoria], ...]}"""
     if os.path.exists(ARCHIVO_EXTRA):
         try:
             with open(ARCHIVO_EXTRA, encoding="utf-8") as f:
-                return json.load(f)
+                datos = json.load(f)
+            if isinstance(datos, dict):
+                return datos
         except (json.JSONDecodeError, OSError):
             pass
-    return []
+    return {}
 
 
-def _entrenar():
+def _entrenar(uid, categorias: dict):
+    """categorias = {clave: nombre} con las categorías que tiene ese usuario."""
     frases, etiquetas = [], []
     for categoria, lista in EJEMPLOS.items():
-        for frase in lista:
+        if categoria in categorias:
+            for frase in lista:
+                frases.append(normalizar(frase))
+                etiquetas.append(categoria)
+    for categoria, nombre in categorias.items():
+        if categoria not in EJEMPLOS:  # categoría creada por el usuario: usamos su nombre como ejemplo
+            for _ in range(3):
+                frases.append(normalizar(nombre))
+                etiquetas.append(categoria)
+    for frase, categoria in _cargar_extra().get(str(uid), []):
+        if categoria in categorias:
             frases.append(normalizar(frase))
             etiquetas.append(categoria)
-    for frase, categoria in _cargar_extra():
-        frases.append(normalizar(frase))
-        etiquetas.append(categoria)
     modelo = make_pipeline(
         TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4)),
         LogisticRegression(C=20, max_iter=2000),
@@ -119,28 +131,37 @@ def _entrenar():
     return modelo
 
 
-_MODELO = _entrenar()
+_MODELOS = {}  # uid -> (firma de las categorías, modelo)
 
 
-def predecir_categoria(texto: str):
+def _modelo(uid, categorias: dict):
+    firma = tuple(sorted(categorias.items()))
+    guardado = _MODELOS.get(uid)
+    if guardado is None or guardado[0] != firma:  # si cambiaron las categorías, reentrena
+        _MODELOS[uid] = (firma, _entrenar(uid, categorias))
+    return _MODELOS[uid][1]
+
+
+def predecir_categoria(uid, texto: str, categorias: dict):
     """Devuelve (categoria, confianza entre 0 y 1)."""
-    probas = _MODELO.predict_proba([normalizar(texto)])[0]
+    modelo = _modelo(uid, categorias)
+    probas = modelo.predict_proba([normalizar(texto)])[0]
     i = probas.argmax()
-    return str(_MODELO.classes_[i]), float(probas[i])
+    return str(modelo.classes_[i]), float(probas[i])
 
 
-def aprender(texto: str, categoria: str):
-    """Guarda una corrección del usuario y reentrena el modelo."""
-    global _MODELO
+def aprender(uid, texto: str, categoria: str):
+    """Guarda una corrección del usuario y reentrena su modelo."""
     extra = _cargar_extra()
-    extra.append([texto, categoria])
+    extra.setdefault(str(uid), []).append([texto, categoria])
     with open(ARCHIVO_EXTRA, "w", encoding="utf-8") as f:
         json.dump(extra, f, ensure_ascii=False, indent=2)
-    _MODELO = _entrenar()
+    _MODELOS.pop(uid, None)
 
 
 if __name__ == "__main__":
+    cats = {k: k.capitalize() for k in EJEMPLOS}
     for prueba in ["pizza con amigos", "uber al trabajo", "cuota del banco", "compre bitcoin",
-                   "me pagaron el mes", "recibo de la luz", "zapatos nuevos", "asdfgh"]:
-        cat, conf = predecir_categoria(prueba)
+                   "me pagaron el mes", "recibo de la luz", "zapatos nuevos"]:
+        cat, conf = predecir_categoria(0, prueba, cats)
         print(f"{prueba:25} -> {cat:12} {conf:.0%}")
